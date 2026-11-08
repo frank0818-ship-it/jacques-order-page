@@ -15,6 +15,14 @@
  *     of the state callback, with a dedupe key in sessionStorage
  *   - money: item-level events arrive in DOLLARS, order totals in CENTS
  *
+ * v3 changes (2026-11-08, after the Nov 6-7 orders):
+ *   - purchase fires only on receipt/order-complete states; "signup:confirm:start"
+ *     had matched /confirm/ and created two fake $0 purchases with no order id
+ *   - a purchase is never sent without an order id
+ *   - value: tries several total fields; if none, reads the total off the
+ *     receipt page after 4s (2 of 6 real orders had landed at $0)
+ *   - adds zuppler_value_src / zuppler_total_keys params for diagnosis
+ *
  * Placement: <script src> in <head>, AFTER the gtag snippet and
  * BEFORE web5.zuppler.com/common.js and order.js.
  * initZupplerBridge must be declared exactly once on the page.
@@ -81,23 +89,66 @@
     try { if (id) window.sessionStorage.setItem(DEDUPE_KEY, id); } catch (_) {}
   }
 
+  // Read "Total: $123.45" / "Tax: $1.23" off the rendered receipt page.
+  function scrapeTotals() {
+    var out = { total: 0, tax: 0 };
+    try {
+      var txt = document.body.innerText || '';
+      var mt = /(?:^|[^a-z])Total[:\s]*\$?\s*([\d,]+\.\d{2})/i.exec(txt);
+      var mx = /(?:^|[^a-z])Tax[:\s]*\$?\s*([\d,]+\.\d{2})/i.exec(txt);
+      if (mt) out.total = parseFloat(mt[1].replace(/,/g, ''));
+      if (mx) out.tax = parseFloat(mx[1].replace(/,/g, ''));
+    } catch (_) {}
+    return out;
+  }
+
+  // First non-empty money field (Zuppler order totals are integer cents).
+  function firstCents(objs, keys) {
+    for (var i = 0; i < objs.length; i++) {
+      var o = objs[i]; if (!o) continue;
+      for (var j = 0; j < keys.length; j++) {
+        var v = Number(o[keys[j]]);
+        if (!isNaN(v) && v > 0) return { value: cents(v), src: keys[j] };
+      }
+    }
+    return { value: 0, src: '' };
+  }
+
   function measurePurchase(order, via) {
     if (!order) return;
     var id = str(order.uuid || order.id || order.order_id);
+    // v3: never send a purchase without an order id (Nov 6: signup states
+    // produced two id-less $0 purchases).
+    if (!id) { send('ordering_purchase_skipped', { reason: 'no_id', zuppler_via: via || 'state' }); return; }
     if (alreadySent(id)) return;
-    var totals = order.totals || order;
-    send('purchase', {
+    markSent(id);
+    var totals = order.totals || {};
+    var srcs = [totals, order];
+    var t = firstCents(srcs, ['total', 'grand_total', 'order_total', 'total_amount']);
+    var tax = firstCents(srcs, ['tax', 'taxes', 'tax_total']).value;
+    var payload = {
       transaction_id: id,
       affiliation: 'Zuppler Online Ordering',
       currency: CURRENCY,
-      value: cents(totals.total),
-      tax: cents(totals.tax),
-      shipping: cents(totals.delivery || totals.delivery_fee),
-      service_fee: cents(totals.service),
+      value: t.value,
+      tax: tax,
+      shipping: firstCents(srcs, ['delivery', 'delivery_fee']).value,
+      service_fee: firstCents(srcs, ['service', 'service_fee']).value,
       zuppler_via: via || 'state',
+      zuppler_value_src: t.src || 'none',
+      zuppler_total_keys: Object.keys(totals).concat(Object.keys(order)).join(',').slice(0, 100),
       items: buildItems(order)
-    });
-    markSent(id);
+    };
+    if (payload.value > 0) { send('purchase', payload); return; }
+    // v3: total missing from the state payload (Nov 6-7: 2 of 6 orders at $0).
+    // Wait for the receipt to render, then read the total off the page.
+    setTimeout(function () {
+      var s = scrapeTotals();
+      payload.value = s.total;
+      if (!payload.tax) payload.tax = s.tax;
+      payload.zuppler_value_src = s.total > 0 ? 'page' : 'none';
+      send('purchase', payload);
+    }, 4000);
   }
 
   // ---- integration state listener -------------------------------------
@@ -125,7 +176,9 @@
       send('begin_checkout', { currency: CURRENCY, zuppler_state: t });
     } else if (/payment/i.test(t)) {
       send('add_payment_info', { currency: CURRENCY, payment_type: str(params.type || params.payment_type), zuppler_state: t });
-    } else if (/receipt|complete|confirm|placed|success/i.test(t)) {
+    } else if (/receipt|order.?(complete|placed|success)/i.test(t) && !/signup|profile|login|account/i.test(t)) {
+      // v3: was /receipt|complete|confirm|.../ which also matched
+      // "signup:confirm:start" and fired fake purchases. Live orders emit "order:receipt".
       try { measurePurchase(params.details || params.order || params, 'state:' + t); }
       catch (e) { warn('purchase failed', e); }
     }
@@ -141,31 +194,24 @@
     if (!m) return;
     var uuid = m[2];
     if (alreadySent(uuid)) return;
-    // Best-effort read of the on-page total; falls back to 0 so the event
-    // still lands with the transaction_id and can be reconciled.
-    var total = 0, tax = 0;
-    try {
-      var txt = document.body.innerText || '';
-      var mt = /Total[:\s]*\$?\s*([\d,]+\.\d{2})/i.exec(txt);
-      var mx = /Tax[:\s]*\$?\s*([\d,]+\.\d{2})/i.exec(txt);
-      if (mt) total = parseFloat(mt[1].replace(/,/g, ''));
-      if (mx) tax = parseFloat(mx[1].replace(/,/g, ''));
-    } catch (_) {}
+    markSent(uuid);
+    var s = scrapeTotals();
     send('purchase', {
       transaction_id: uuid,
       affiliation: 'Zuppler Online Ordering',
       currency: CURRENCY,
-      value: total,
-      tax: tax,
+      value: s.total,
+      tax: s.tax,
       zuppler_via: 'url',
+      zuppler_value_src: s.total > 0 ? 'page' : 'none',
       items: []
     });
-    markSent(uuid);
   }
 
-  window.addEventListener('hashchange', function () { setTimeout(tryUrlPurchase, 1500); });
-  if (document.readyState === 'complete') setTimeout(tryUrlPurchase, 1500);
-  else window.addEventListener('load', function () { setTimeout(tryUrlPurchase, 1500); });
+  // v3: 4s (was 1.5s) so the state callback wins and the receipt has rendered.
+  window.addEventListener('hashchange', function () { setTimeout(tryUrlPurchase, 4000); });
+  if (document.readyState === 'complete') setTimeout(tryUrlPurchase, 4000);
+  else window.addEventListener('load', function () { setTimeout(tryUrlPurchase, 4000); });
 
   // ---- register with Zuppler ------------------------------------------
   if (typeof window.initZupplerBridge === 'function') {
