@@ -22,8 +22,13 @@
       gtag('config', 'G-5VEK0ZKYGL');
     </script>
 
-    <!-- Zuppler -> GA4 bridge: must load after gtag, before the web5.zuppler.com scripts -->
-    <script src="zuppler-ga4-bridge.js?v=3"></script>
+    <!-- Microsoft Advertising UET tag (same tag as jacquescatering.com, ID 271012239) -->
+    <script>
+      (function(w,d,t,u,o){w[u]=w[u]||[],o.ts=(new Date).getTime();var n=d.createElement(t);n.src="https://bat.bing.net/bat.js?ti="+o.ti+("uetq"!=u?"&q="+u:""),n.async=1,n.onload=n.onreadystatechange=function(){var s=this.readyState;s&&"loaded"!==s&&"complete"!==s||(o.q=w[u],w[u]=new UET(o),w[u].push("pageLoad"),n.onload=n.onreadystatechange=null)};var i=d.getElementsByTagName(t)[0];i.parentNode.insertBefore(n,i)})(window,document,"script","uetq",{ti:"271012239",enableAutoSpaTracking:true});
+    </script>
+
+    <!-- Zuppler -> GA4 + Microsoft bridge: must load after gtag and UET, before the web5.zuppler.com scripts -->
+    <script src="zuppler-ga4-bridge.js?v=4"></script>
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

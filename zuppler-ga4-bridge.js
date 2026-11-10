@@ -23,6 +23,11 @@
  *     receipt page after 4s (2 of 6 real orders had landed at $0)
  *   - adds zuppler_value_src / zuppler_total_keys params for diagnosis
  *
+ * v4 changes (2026-11-10):
+ *   - each purchase is also pushed to Microsoft Advertising UET (tag 271012239,
+ *     loaded in index.html) as custom event 'purchase' with revenue_value, for the
+ *     Microsoft goal "Online order"
+ *
  * Placement: <script src> in <head>, AFTER the gtag snippet and
  * BEFORE web5.zuppler.com/common.js and order.js.
  * initZupplerBridge must be declared exactly once on the page.
@@ -44,6 +49,18 @@
         window.dataLayer.push({ event: name, zuppler: params || {} });
       }
     } catch (e) { warn('send failed', name, e); }
+    // v4: confirmed purchases also go to Microsoft Advertising (UET goal "Online order",
+    // custom event action = purchase). Only 'purchase' is mirrored; purchase only fires
+    // with an order id and is deduped per order (see measurePurchase / tryUrlPurchase).
+    if (name === 'purchase') {
+      try {
+        window.uetq = window.uetq || [];
+        window.uetq.push('event', 'purchase', {
+          revenue_value: Number((params && params.value) || 0),
+          currency: CURRENCY
+        });
+      } catch (e) { warn('uet purchase failed', e); }
+    }
   }
 
   // Order totals from Zuppler are integer cents.
